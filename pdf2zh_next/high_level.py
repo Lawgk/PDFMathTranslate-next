@@ -19,6 +19,7 @@ from babeldoc.format.pdf.translation_config import (
 )
 from babeldoc.glossary import Glossary
 from babeldoc.main import create_progress_handler
+from babeldoc.translator.translator import set_translate_rate_limiter
 from rich.logging import RichHandler
 
 from pdf2zh_next.config.model import SettingsModel
@@ -579,6 +580,13 @@ def create_babeldoc_config(settings: SettingsModel, file: Path) -> BabelDOCConfi
 
         table_model = RapidOCRModel()
 
+    # Log qps parameter being passed to BabelDOC
+    logger.info(f"Creating BabelDOC config with qps={settings.translation.qps}, pool_max_workers={settings.translation.pool_max_workers}")
+    
+    # Set global translate rate limiter for BabelDOC
+    set_translate_rate_limiter(settings.translation.qps)
+    logger.info(f"Set BabelDOC translate rate limiter to qps={settings.translation.qps}")
+    
     babeldoc_config = BabelDOCConfig(
         input_file=file,
         font=None,

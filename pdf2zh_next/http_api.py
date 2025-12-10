@@ -602,6 +602,10 @@ def create_settings_from_request(
     # Create basic settings
     basic = BasicSettings(input_files={str(input_file)})
 
+    # Log translation parameters for debugging
+    logger.info(f"Translation parameters: model={request.model}, lang_in={request.lang_in}, lang_out={request.lang_out}, "
+                f"qps={request.qps}, min_text_length={request.min_text_length}, ignore_cache={request.ignore_cache}")
+    
     # Create translation settings with output directory
     translation = TranslationSettings(
         lang_in=request.lang_in,
