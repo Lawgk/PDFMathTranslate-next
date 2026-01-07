@@ -38,7 +38,7 @@ MIN_TASK_AGE_MINUTES = 30  # Minimum age before task can be cleaned (allow downl
 CLEANUP_INTERVAL_SECONDS = 300  # Run cleanup every 5 minutes (aggressive)
 MAX_STORAGE_GB = 2  # Maximum storage limit in GB (aggressive)
 STORAGE_WARNING_THRESHOLD = 0.7  # Start aggressive cleanup at 70% capacity
-MAX_TASK_SIZE_MB = 200  # Maximum size per task in MB
+MAX_TASK_SIZE_MB = 300  # Maximum size per task in MB
 
 # In-memory storage for translation tasks
 translation_tasks: dict[str, dict[str, Any]] = {}
