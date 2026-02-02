@@ -15,51 +15,114 @@ class ModelInfo(TypedDict):
 # Supported models via OpenAI Compatible API
 SUPPORTED_MODELS: list[ModelInfo] = [
     {
-        "id": "DeepSeek-V3.2-Exp",
+        "id": "deepseek-v3.2",
         "name": "DeepSeek V3.2",
         "provider": "DeepSeek",
-        "description": "Advanced reasoning model from DeepSeek",
+        "description": "DeepSeek 最新大模型",
         "context_length": 64000,
     },
     {
-        "id": "gpt-5-mini",
-        "name": "GPT 5 Mini",
-        "provider": "OpenAI",
-        "description": "Latest GPT-5 mini model",
-        "context_length": 128000,
-    },
-    {
-        "id": "qwen3-vl-235b-a22b-instruct",
-        "name": "Qwen3 235B",
+        "id": "qwen3-max",
+        "name": "Qwen3 Max",
         "provider": "Alibaba",
-        "description": "Large Qwen3 model with vision capabilities",
+        "description": "通义千问 3 旗舰版",
         "context_length": 32768,
     },
     {
-        "id": "Kimi-K2-0905",
-        "name": "Kimi K2",
+        "id": "kimi-k2.5",
+        "name": "Kimi K2.5",
         "provider": "Moonshot",
-        "description": "Kimi K2 intelligent model",
+        "description": "Moonshot Kimi K2.5",
+        "context_length": 128000,
+    },
+    {
+        "id": "gpt-5-mini",
+        "name": "GPT-5 Mini",
+        "provider": "OpenAI",
+        "description": "OpenAI GPT-5 Mini",
+        "context_length": 128000,
+    },
+    {
+        "id": "gpt-5.2",
+        "name": "GPT-5.2",
+        "provider": "OpenAI",
+        "description": "OpenAI GPT-5.2",
+        "context_length": 128000,
+    },
+    {
+        "id": "gpt-4o",
+        "name": "GPT-4o",
+        "provider": "OpenAI",
+        "description": "OpenAI GPT-4o",
+        "context_length": 128000,
+    },
+    {
+        "id": "gpt-4o-mini",
+        "name": "GPT-4o Mini",
+        "provider": "OpenAI",
+        "description": "OpenAI GPT-4o Mini",
+        "context_length": 128000,
+    },
+    {
+        "id": "gemini-2.0-flash",
+        "name": "Gemini 2.0 Flash",
+        "provider": "Google",
+        "description": "Google Gemini 2.0 Flash",
+        "context_length": 128000,
+    },
+    {
+        "id": "gemini-3-flash-preview",
+        "name": "Gemini 3 Flash Preview",
+        "provider": "Google",
+        "description": "Google Gemini 3 Flash Preview",
+        "context_length": 128000,
+    },
+    {
+        "id": "gemini-3-pro-preview",
+        "name": "Gemini 3 Pro Preview",
+        "provider": "Google",
+        "description": "Google Gemini 3 Pro Preview",
         "context_length": 128000,
     },
     {
         "id": "claude-haiku-4-5",
         "name": "Claude Haiku 4.5",
         "provider": "Anthropic",
-        "description": "Latest Claude Haiku model",
+        "description": "Anthropic Claude Haiku 4.5",
         "context_length": 200000,
     },
     {
-        "id": "gemini-2.0-flash",
-        "name": "Gemini-2.0-Flash",
-        "provider": "Google",
-        "description": "Google's Gemini Flash model",
-        "context_length": 128000,
-    }
+        "id": "claude-sonnet-4-5",
+        "name": "Claude Sonnet 4.5",
+        "provider": "Anthropic",
+        "description": "Anthropic Claude Sonnet 4.5",
+        "context_length": 200000,
+    },
+    {
+        "id": "gpt-oss-120b",
+        "name": "GPT OSS 120B",
+        "provider": "OpenSource",
+        "description": "Open Source GPT 120B",
+        "context_length": 32768,
+    },
+    {
+        "id": "DeepSeek-V3.2-Exp",
+        "name": "DeepSeek V3.2 Exp",
+        "provider": "DeepSeek",
+        "description": "DeepSeek V3.2 Experimental",
+        "context_length": 64000,
+    },
+    {
+        "id": "qwen-plus-latest",
+        "name": "Qwen Plus Latest",
+        "provider": "Alibaba",
+        "description": "Qwen Plus Latest Model",
+        "context_length": 32768,
+    },
 ]
 
 # Default model if none specified
-DEFAULT_MODEL = "DeepSeek-V3.2-Exp"
+DEFAULT_MODEL = "deepseek-v3.2"
 
 
 def get_model_by_id(model_id: str) -> ModelInfo | None:
