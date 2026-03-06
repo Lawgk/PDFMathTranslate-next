@@ -71,6 +71,13 @@ SUPPORTED_MODELS: list[ModelInfo] = [
         "context_length": 128000,
     },
     {
+        "id": "gemini-2.5-flash",
+        "name": "Gemini 2.5 Flash",
+        "provider": "Google",
+        "description": "Google Gemini 2.5 Flash",
+        "context_length": 128000,
+    },
+    {
         "id": "gemini-3-flash-preview",
         "name": "Gemini 3 Flash Preview",
         "provider": "Google",
