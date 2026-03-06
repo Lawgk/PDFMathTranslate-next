@@ -71,10 +71,10 @@ SUPPORTED_MODELS: list[ModelInfo] = [
         "context_length": 128000,
     },
     {
-        "id": "gemini-3.1-flash-lite-preview",
-        "name": "Gemini 3.1 Flash Lite Preview",
+        "id": "gemini-3.1-flash-lite",
+        "name": "Gemini 3.1 Flash Lite",
         "provider": "Google",
-        "description": "Google Gemini 3.1 Flash Lite Preview",
+        "description": "Google Gemini 3.1 Flash Lite",
         "context_length": 128000,
     },
     {
