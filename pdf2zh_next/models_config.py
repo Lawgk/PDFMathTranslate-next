@@ -22,6 +22,13 @@ SUPPORTED_MODELS: list[ModelInfo] = [
         "context_length": 64000,
     },
     {
+        "id": "deepseek-v4-flash",
+        "name": "DeepSeek V4 Flash",
+        "provider": "DeepSeek",
+        "description": "DeepSeek V4 Flash，百万字超长上下文",
+        "context_length": 1000000,
+    },
+    {
         "id": "qwen3-max",
         "name": "Qwen3 Max",
         "provider": "Alibaba",
