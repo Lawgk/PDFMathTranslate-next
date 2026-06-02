@@ -554,12 +554,12 @@ def create_settings_from_request(
     glossaries: str | None = None
 ) -> Any:
     """Create settings from translation request.
-    
+
     All translations use OpenAI Compatible API.
-    Configuration is loaded from environment variables:
-    - OPENAI_API_BASE: API endpoint (base URL)
-    - OPENAI_API_KEY: API key
-    
+    Credentials are resolved per request, falling back to environment variables:
+    - base URL: request.openai_base_url or OPENAI_API_BASE
+    - API key:  request.openai_api_key or OPENAI_API_KEY
+
     Args:
         request: Translation request parameters
         input_file: Path to input PDF file
@@ -582,19 +582,21 @@ def create_settings_from_request(
             f"Use GET /v1/models to see all available models."
         )
 
-    # Read configuration from environment variables
-    base_url = os.environ.get("OPENAI_API_BASE")
-    api_key = os.environ.get("OPENAI_API_KEY")
-    
+    # Resolve configuration: per-request values take precedence over env vars
+    base_url = request.openai_base_url or os.environ.get("OPENAI_API_BASE")
+    api_key = request.openai_api_key or os.environ.get("OPENAI_API_KEY")
+
     if not base_url:
         raise ValueError(
-            "OPENAI_API_BASE environment variable is required. "
-            "Please set it to your OpenAI-compatible API endpoint."
+            "OpenAI-compatible base URL is required. "
+            "Provide 'openai_base_url' in the request or set the "
+            "OPENAI_API_BASE environment variable."
         )
     if not api_key:
         raise ValueError(
-            "OPENAI_API_KEY environment variable is required. "
-            "Please set it to your API key."
+            "OpenAI-compatible API key is required. "
+            "Provide 'openai_api_key' in the request or set the "
+            "OPENAI_API_KEY environment variable."
         )
 
     logger.info(f"Using model: {request.model}")
@@ -775,12 +777,16 @@ async def create_translation(
     save_auto_extracted_glossary: bool = Form(False),
     # Advanced options
     rpc_doclayout: str | None = Form(None),
+    # Per-request OpenAI-compatible credentials (override env vars when provided)
+    openai_base_url: str | None = Form(None),
+    openai_api_key: str | None = Form(None),
 ):
     """
     Create a new translation task.
 
     All translations use OpenAI Compatible API.
-    Configuration must be set via environment variables:
+    Credentials may be supplied per request (openai_base_url / openai_api_key);
+    if omitted, they fall back to environment variables:
     - OPENAI_API_BASE: OpenAI-compatible API endpoint (base URL)
     - OPENAI_API_KEY: API key
 
@@ -865,6 +871,9 @@ async def create_translation(
             save_auto_extracted_glossary=save_auto_extracted_glossary,
             # Advanced options
             rpc_doclayout=rpc_doclayout,
+            # Per-request OpenAI-compatible credentials
+            openai_base_url=openai_base_url,
+            openai_api_key=openai_api_key,
         )
 
         # Process glossary files
