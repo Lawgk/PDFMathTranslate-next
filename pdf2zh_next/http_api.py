@@ -575,16 +575,22 @@ def create_settings_from_request(
         TranslationSettings,
     )
 
-    # Validate model
-    if not is_model_supported(request.model):
+    # Resolve configuration: per-request values take precedence over env vars
+    base_url = request.openai_base_url or os.environ.get("OPENAI_API_BASE")
+    api_key = request.openai_api_key or os.environ.get("OPENAI_API_KEY")
+
+    # A per-request base URL routes through an upstream gateway that owns the
+    # authoritative model catalog, so defer model validation to it; env-var-only
+    # callers keep the local whitelist check.
+    if request.openai_base_url:
+        logger.info(
+            f"Per-request base URL set; deferring model validation for '{request.model}' to upstream"
+        )
+    elif not is_model_supported(request.model):
         raise ValueError(
             f"Unsupported model: {request.model}. "
             f"Use GET /v1/models to see all available models."
         )
-
-    # Resolve configuration: per-request values take precedence over env vars
-    base_url = request.openai_base_url or os.environ.get("OPENAI_API_BASE")
-    api_key = request.openai_api_key or os.environ.get("OPENAI_API_KEY")
 
     if not base_url:
         raise ValueError(
