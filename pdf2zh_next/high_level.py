@@ -5,6 +5,7 @@ import multiprocessing
 import multiprocessing.connection
 import multiprocessing.queues
 import queue
+import sys
 import threading
 import traceback
 from collections.abc import AsyncGenerator
@@ -107,6 +108,12 @@ class SubprocessCrashError(TranslationError):
 
 
 logger = logging.getLogger(__name__)
+
+# Maximum time to wait for the next message from the translation subprocess.
+# Subprocess death is detected immediately via its sentinel (see recv_thread),
+# so this only guards against a subprocess that is alive but hung; normal
+# translations emit progress events far more often than this.
+SUBPROCESS_EVENT_TIMEOUT_SECONDS = 5 * 60
 
 
 def _translate_wrapper(
@@ -340,8 +347,7 @@ async def _translate_in_subprocess(
     settings: SettingsModel,
     file: Path,
 ):
-    # 30 minutes timeout
-    cb = asynchronize.AsyncCallback(timeout=30 * 60)
+    cb = asynchronize.AsyncCallback(timeout=SUBPROCESS_EVENT_TIMEOUT_SECONDS)
 
     (pipe_progress_recv, pipe_progress_send) = multiprocessing.Pipe(duplex=False)
     (pipe_cancel_message_recv, pipe_cancel_message_send) = multiprocessing.Pipe(
@@ -355,6 +361,28 @@ async def _translate_in_subprocess(
             if cancel_event.is_set():
                 break
             try:
+                # Also wait on the process sentinel: the parent holds the
+                # write end of this pipe too, so a subprocess dying without a
+                # final message (e.g. OOM-killed) never produces an EOF and a
+                # bare recv() would block until the event timeout. The
+                # sentinel lets us detect the death immediately.
+                ready = multiprocessing.connection.wait(
+                    [pipe_progress_recv, translate_process.sentinel]
+                )
+                if cancel_event.is_set():
+                    break
+                if pipe_progress_recv not in ready:
+                    # Only the sentinel fired: the subprocess exited. Give a
+                    # final message racing with the exit a moment to arrive.
+                    if pipe_progress_recv.poll(0.5):
+                        continue
+                    error = SubprocessCrashError(
+                        "Translation subprocess exited without sending a final message",
+                        exit_code=translate_process.exitcode,
+                    )
+                    logger.error(str(error))
+                    cb.error_callback(error)
+                    break
                 event = pipe_progress_recv.recv()
                 if event is None:
                     logger.debug("recv none event")
@@ -384,8 +412,12 @@ async def _translate_in_subprocess(
                 cb.error_callback(error)
                 break
             except Exception as e:
-                if not cancel_event.is_set():
-                    logger.error(f"Error receiving event: {e}")
+                if cancel_event.is_set():
+                    # Teardown in the main task closed the pipe under us;
+                    # not a real IPC failure, and reporting it would mask
+                    # the original error.
+                    break
+                logger.error(f"Error receiving event: {e}")
                 error = IPCError(f"IPC error: {e}", details=str(e))
                 cb.error_callback(error)
                 break
@@ -408,11 +440,8 @@ async def _translate_in_subprocess(
                 logger.error("Failure in listener_process")
                 break
 
-    recv_t = threading.Thread(target=recv_thread)
-    recv_t.start()
-    log_t = threading.Thread(target=log_thread)
-    log_t.start()
-
+    # Start the process before the recv thread: recv_thread waits on the
+    # process sentinel, so the process object must exist first.
     translate_process = multiprocessing.Process(
         target=_translate_wrapper,
         args=(
@@ -424,6 +453,11 @@ async def _translate_in_subprocess(
         ),
     )
     translate_process.start()
+
+    recv_t = threading.Thread(target=recv_thread)
+    recv_t.start()
+    log_t = threading.Thread(target=log_thread)
+    log_t.start()
     cancel_flag = False
     try:
         async for event in cb:
@@ -433,6 +467,11 @@ async def _translate_in_subprocess(
                 # This will break out of the loop
                 break
             yield event.args[0]
+    except (TimeoutError, asyncio.TimeoutError) as e:
+        raise IPCError(
+            f"No message from translation subprocess for "
+            f"{SUBPROCESS_EVENT_TIMEOUT_SECONDS} seconds; assuming it is stuck"
+        ) from e
     except asyncio.CancelledError:
         cancel_flag = True
         logger.info("Process Translation cancelled")
@@ -501,7 +540,9 @@ async def _translate_in_subprocess(
             logger.debug(f"Failed to close logger_queue: {e}")
 
         logger.debug("translate process exit code: %s", translate_process.exitcode)
-        if not cancel_flag:
+        if not cancel_flag and sys.exc_info()[1] is None:
+            # Raise from here only when no exception is already propagating,
+            # otherwise the original failure would be masked by this one.
             # Check if the process crashed but no error was captured through IPC
             if translate_process.exitcode not in (0, None) and not cb.has_error():
                 error = SubprocessCrashError(
