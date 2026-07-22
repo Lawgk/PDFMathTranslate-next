@@ -13,6 +13,7 @@ import csv
 import io
 import json
 import logging
+import os
 import shutil
 import tempfile
 from contextlib import asynccontextmanager
@@ -36,6 +37,9 @@ logger = logging.getLogger(__name__)
 
 # Generous transfer timeout for large PDFs (source pull / result push).
 _TRANSFER_TIMEOUT = httpx.Timeout(connect=30.0, read=600.0, write=600.0, pool=30.0)
+
+MAX_CONCURRENT_TRANSLATIONS = int(os.environ.get("MAX_CONCURRENT_TRANSLATIONS", "2"))
+_active_translations = 0
 
 
 class TranslationRequest(BaseModel):
@@ -439,13 +443,29 @@ async def create_translation_stream(request: StreamTranslationRequest):
         event: done        data: {"mono": bool, "dual": bool, "time_cost_seconds"}
         event: error       data: {"message"}
     """
+    global _active_translations
+    # Reject at capacity
+    if _active_translations >= MAX_CONCURRENT_TRANSLATIONS:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"At capacity ({_active_translations}/{MAX_CONCURRENT_TRANSLATIONS} "
+                f"translations in flight); retry another replica"
+            ),
+            headers={"Retry-After": "5"},
+        )
+
     # Skip an output when no PUT target was provided for it.
     request.no_mono = request.no_mono or request.mono_put_url is None
     request.no_dual = request.no_dual or request.dual_put_url is None
 
     work_dir = Path(tempfile.mkdtemp(prefix="pdf2zh_stream_"))
+    # Claim the slot last so any failure above cannot leak it; the paired
+    # release lives in the generator's finally.
+    _active_translations += 1
 
     async def event_generator():
+        global _active_translations
         try:
             input_file = work_dir / "input.pdf"
             async with httpx.AsyncClient(
@@ -521,6 +541,7 @@ async def create_translation_stream(request: StreamTranslationRequest):
             logger.error(f"Streaming translation failed: {e}")
             yield {"event": "error", "data": json.dumps({"message": str(e)})}
         finally:
+            _active_translations -= 1
             shutil.rmtree(work_dir, ignore_errors=True)
 
     return EventSourceResponse(event_generator())
@@ -528,8 +549,13 @@ async def create_translation_stream(request: StreamTranslationRequest):
 
 @app.get("/v1/health")
 async def health_check():
-    """Health check endpoint."""
-    return {"status": "healthy", "service": "pdf2zh-next-api"}
+    """Health check endpoint (includes concurrency gate load for observability)."""
+    return {
+        "status": "healthy",
+        "service": "pdf2zh-next-api",
+        "active_translations": _active_translations,
+        "max_concurrent_translations": MAX_CONCURRENT_TRANSLATIONS,
+    }
 
 
 @app.get("/v1/models")
