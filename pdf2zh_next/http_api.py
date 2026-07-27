@@ -26,6 +26,7 @@ import httpx
 from fastapi import FastAPI
 from fastapi import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 from pydantic import Field
 from sse_starlette.sse import EventSourceResponse
@@ -40,6 +41,38 @@ _TRANSFER_TIMEOUT = httpx.Timeout(connect=30.0, read=600.0, write=600.0, pool=30
 
 MAX_CONCURRENT_TRANSLATIONS = int(os.environ.get("MAX_CONCURRENT_TRANSLATIONS", "2"))
 _active_translations = 0
+_capacity_rejections = 0
+
+# Advertised to rejected callers via Retry-After. Deliberately short: the caller
+# gives its worker slot back on rejection, so probing again is cheap.
+CAPACITY_RETRY_AFTER_SECONDS = 5
+
+
+class _ConcurrencySlot:
+    """One occupied slot of the per-pod concurrency gate.
+
+    Claimed in the request handler — where the check and the claim are separated
+    only by synchronous statements, so no other request can interleave — but
+    released from the SSE generator, which runs later and in another scope.
+    Release is idempotent because the handler has to be able to release it too:
+    the generator body, and therefore its ``finally``, never runs if building the
+    response fails, and then nothing would ever give the slot back. A leaked slot
+    is permanent — it shrinks this pod's capacity until restart.
+    """
+
+    __slots__ = ("_released",)
+
+    def __init__(self) -> None:
+        global _active_translations
+        _active_translations += 1
+        self._released = False
+
+    def release(self) -> None:
+        global _active_translations
+        if self._released:
+            return
+        self._released = True
+        _active_translations -= 1
 
 
 class TranslationRequest(BaseModel):
@@ -443,16 +476,17 @@ async def create_translation_stream(request: StreamTranslationRequest):
         event: done        data: {"mono": bool, "dual": bool, "time_cost_seconds"}
         event: error       data: {"message"}
     """
-    global _active_translations
+    global _capacity_rejections
     # Reject at capacity
     if _active_translations >= MAX_CONCURRENT_TRANSLATIONS:
+        _capacity_rejections += 1
         raise HTTPException(
             status_code=503,
             detail=(
                 f"At capacity ({_active_translations}/{MAX_CONCURRENT_TRANSLATIONS} "
                 f"translations in flight); retry another replica"
             ),
-            headers={"Retry-After": "5"},
+            headers={"Retry-After": str(CAPACITY_RETRY_AFTER_SECONDS)},
         )
 
     # Skip an output when no PUT target was provided for it.
@@ -460,12 +494,10 @@ async def create_translation_stream(request: StreamTranslationRequest):
     request.no_dual = request.no_dual or request.dual_put_url is None
 
     work_dir = Path(tempfile.mkdtemp(prefix="pdf2zh_stream_"))
-    # Claim the slot last so any failure above cannot leak it; the paired
-    # release lives in the generator's finally.
-    _active_translations += 1
+    # Claim the slot last so any failure above cannot leak it.
+    slot = _ConcurrencySlot()
 
     async def event_generator():
-        global _active_translations
         try:
             input_file = work_dir / "input.pdf"
             async with httpx.AsyncClient(
@@ -541,10 +573,45 @@ async def create_translation_stream(request: StreamTranslationRequest):
             logger.error(f"Streaming translation failed: {e}")
             yield {"event": "error", "data": json.dumps({"message": str(e)})}
         finally:
-            _active_translations -= 1
+            slot.release()
             shutil.rmtree(work_dir, ignore_errors=True)
 
-    return EventSourceResponse(event_generator())
+    try:
+        return EventSourceResponse(event_generator())
+    except BaseException:
+        # Nothing has driven the generator yet, so its finally cannot run: undo
+        # the claim here or this pod permanently loses a slot and leaks the dir.
+        slot.release()
+        shutil.rmtree(work_dir, ignore_errors=True)
+        raise
+
+
+@app.get("/metrics")
+async def metrics():
+    """Prometheus exposition of the concurrency gate.
+
+    This pod knows its own utilisation exactly; callers can only infer it, so
+    autoscaling and saturation alerts should read it from here. Fleet utilisation:
+
+        sum(pdf2zh_active_translations) / sum(pdf2zh_max_concurrent_translations)
+
+    Hand-rolled rather than adding prometheus_client: three unlabelled numbers do
+    not justify the dependency, and the text format for that case is trivial.
+    """
+    body = (
+        "# HELP pdf2zh_active_translations Translations in flight on this pod.\n"
+        "# TYPE pdf2zh_active_translations gauge\n"
+        f"pdf2zh_active_translations {_active_translations}\n"
+        "# HELP pdf2zh_max_concurrent_translations Concurrency gate size on this pod.\n"
+        "# TYPE pdf2zh_max_concurrent_translations gauge\n"
+        f"pdf2zh_max_concurrent_translations {MAX_CONCURRENT_TRANSLATIONS}\n"
+        "# HELP pdf2zh_capacity_rejections_total Requests turned away with 503 by the gate.\n"
+        "# TYPE pdf2zh_capacity_rejections_total counter\n"
+        f"pdf2zh_capacity_rejections_total {_capacity_rejections}\n"
+    )
+    return PlainTextResponse(
+        body, media_type="text/plain; version=0.0.4; charset=utf-8"
+    )
 
 
 @app.get("/v1/health")
