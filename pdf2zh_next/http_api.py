@@ -635,9 +635,43 @@ async def list_models():
     }
 
 
+def _keep_sse_alive_through_shutdown() -> None:
+    """Stop sse-starlette from killing in-flight translations on SIGTERM. """
+    try:
+        from sse_starlette.sse import AppStatus
+    except ImportError:
+        return
+
+    disable_drain = getattr(AppStatus, "disable_automatic_graceful_drain", None)
+    if callable(disable_drain):
+        disable_drain()
+        logger.info("sse-starlette auto-drain disabled; SSE streams survive SIGTERM")
+        return
+
+    try:
+        from uvicorn.main import Server
+    except ImportError:
+        return
+    if AppStatus.original_handler is not None:
+        Server.handle_exit = AppStatus.original_handler
+        logger.info("Restored uvicorn's exit handler; SSE streams survive SIGTERM")
+        return
+
+    # Neither lever is available. Say so loudly: the symptom is silent and
+    # remote — translations are cut on every scale-down and the caller quietly
+    # spends a retry attempt per interrupted task.
+    logger.warning(
+        "Could not disable sse-starlette's shutdown drain; in-flight "
+        "translations will be cut on SIGTERM. Check the installed version "
+        "against the sse-starlette pin in pyproject.toml."
+    )
+
+
 def run_server(host: str = "0.0.0.0", port: int = 11008, reload: bool = False):
     """Run the HTTP API server."""
     import uvicorn
+
+    _keep_sse_alive_through_shutdown()
 
     uvicorn.run(
         "pdf2zh_next.http_api:app",
@@ -647,6 +681,10 @@ def run_server(host: str = "0.0.0.0", port: int = 11008, reload: bool = False):
         log_level="info",
         access_log=True,
         log_config=None,  # let uvicorn use root logger (Rich)
+        # Drain contract: wait for in-flight SSE translations for as long as k8s
+        # allows (terminationGracePeriodSeconds bounds it with SIGKILL). A finite
+        # value here would cut streams that k8s was still willing to wait for.
+        timeout_graceful_shutdown=None,
     )
 
 

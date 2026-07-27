@@ -38,7 +38,11 @@ dependencies = [
     "pydantic-settings>=2.8.1",
     "pydantic>=2.10.6",
     "httpx>=0.28.1",
-    "sse-starlette>=2.3.3",
+    # 3.4.6 is the floor that has AppStatus.disable_automatic_graceful_drain,
+    # without which every scale-down cuts the translations in flight — see
+    # _keep_sse_alive_through_shutdown in http_api.py. Capped below 4 because
+    # that opt-out is the whole drain contract and a major bump may move it.
+    "sse-starlette>=3.4.6,<4",
     "fastapi>=0.115.12",
     "uvicorn>=0.34.2",
     "legacy-cgi; python_version >= '3.13'",
