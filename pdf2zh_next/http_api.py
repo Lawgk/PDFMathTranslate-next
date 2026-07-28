@@ -557,7 +557,15 @@ async def create_translation_stream(request: StreamTranslationRequest):
                 elif event_type == "error":
                     message = event.get("error", "Unknown error")
                     logger.error(f"Translation error: {message}")
-                    yield {"event": "error", "data": json.dumps({"message": message})}
+                    # The exception class name is the caller's only way to tell a
+                    # dead subprocess (worth retrying) from a bad document.
+                    yield {
+                        "event": "error",
+                        "data": json.dumps({
+                            "message": message,
+                            "error_type": event.get("error_type"),
+                        }),
+                    }
                     return
 
         except asyncio.CancelledError:
