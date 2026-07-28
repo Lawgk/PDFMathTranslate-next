@@ -26,7 +26,6 @@ import httpx
 from fastapi import FastAPI
 from fastapi import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 from pydantic import Field
 from sse_starlette.sse import EventSourceResponse
@@ -41,7 +40,6 @@ _TRANSFER_TIMEOUT = httpx.Timeout(connect=30.0, read=600.0, write=600.0, pool=30
 
 MAX_CONCURRENT_TRANSLATIONS = int(os.environ.get("MAX_CONCURRENT_TRANSLATIONS", "2"))
 _active_translations = 0
-_capacity_rejections = 0
 
 # Advertised to rejected callers via Retry-After. Deliberately short: the caller
 # gives its worker slot back on rejection, so probing again is cheap.
@@ -476,10 +474,8 @@ async def create_translation_stream(request: StreamTranslationRequest):
         event: done        data: {"mono": bool, "dual": bool, "time_cost_seconds"}
         event: error       data: {"message"}
     """
-    global _capacity_rejections
     # Reject at capacity
     if _active_translations >= MAX_CONCURRENT_TRANSLATIONS:
-        _capacity_rejections += 1
         raise HTTPException(
             status_code=503,
             detail=(
@@ -584,34 +580,6 @@ async def create_translation_stream(request: StreamTranslationRequest):
         slot.release()
         shutil.rmtree(work_dir, ignore_errors=True)
         raise
-
-
-@app.get("/metrics")
-async def metrics():
-    """Prometheus exposition of the concurrency gate.
-
-    This pod knows its own utilisation exactly; callers can only infer it, so
-    autoscaling and saturation alerts should read it from here. Fleet utilisation:
-
-        sum(pdf2zh_active_translations) / sum(pdf2zh_max_concurrent_translations)
-
-    Hand-rolled rather than adding prometheus_client: three unlabelled numbers do
-    not justify the dependency, and the text format for that case is trivial.
-    """
-    body = (
-        "# HELP pdf2zh_active_translations Translations in flight on this pod.\n"
-        "# TYPE pdf2zh_active_translations gauge\n"
-        f"pdf2zh_active_translations {_active_translations}\n"
-        "# HELP pdf2zh_max_concurrent_translations Concurrency gate size on this pod.\n"
-        "# TYPE pdf2zh_max_concurrent_translations gauge\n"
-        f"pdf2zh_max_concurrent_translations {MAX_CONCURRENT_TRANSLATIONS}\n"
-        "# HELP pdf2zh_capacity_rejections_total Requests turned away with 503 by the gate.\n"
-        "# TYPE pdf2zh_capacity_rejections_total counter\n"
-        f"pdf2zh_capacity_rejections_total {_capacity_rejections}\n"
-    )
-    return PlainTextResponse(
-        body, media_type="text/plain; version=0.0.4; charset=utf-8"
-    )
 
 
 @app.get("/v1/health")
