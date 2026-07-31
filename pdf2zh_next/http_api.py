@@ -38,6 +38,27 @@ logger = logging.getLogger(__name__)
 # Generous transfer timeout for large PDFs (source pull / result push).
 _TRANSFER_TIMEOUT = httpx.Timeout(connect=30.0, read=600.0, write=600.0, pool=30.0)
 
+# Floor for extractable text in a finished translation, below which the result is
+# reported as a failure instead of being shipped.
+#
+# BabelDOC can finish "successfully" on a document whose content stream it failed
+# to rebuild, yielding a PDF of blank pages. That outcome is worse than an error:
+# the caller is billed, the task is marked complete, and nobody notices until the
+# user opens the file. A real page carries well over a thousand characters, so a
+# floor of 8 per page cannot false-positive on genuine content — including sparse
+# title pages and figure-only documents — while still catching an empty result.
+_MIN_CHARS_PER_PAGE = 8
+_MIN_CHARS_ABSOLUTE = 16
+
+
+class EmptyTranslationError(Exception):
+    """The pipeline finished but the output carries no translated text.
+
+    Distinct from a pipeline exception: nothing crashed, the document simply
+    never yielded anything translatable. Reported to the caller as a normal
+    document-level failure so it refunds instead of shipping blank pages.
+    """
+
 MAX_CONCURRENT_TRANSLATIONS = int(os.environ.get("MAX_CONCURRENT_TRANSLATIONS", "2"))
 _active_translations = 0
 
@@ -436,6 +457,42 @@ async def _upload_file(client: httpx.AsyncClient, put_url: str, src: Path) -> No
     resp.raise_for_status()
 
 
+def _count_extractable_chars(pdf_path: Path) -> tuple[int, int]:
+    """Return (non-whitespace character count, page count) of a generated PDF.
+
+    Used to tell a real translation from a blank one. Reads the file that is
+    about to be uploaded rather than trusting the pipeline's own report, so a
+    silent rendering failure anywhere upstream still gets caught here.
+    """
+    import pymupdf
+
+    chars = 0
+    with pymupdf.open(pdf_path) as doc:
+        page_count = doc.page_count
+        for page in doc:
+            chars += len("".join(page.get_text().split()))
+    return chars, page_count
+
+
+def _check_output_has_text(pdf_path: Path) -> int:
+    """Raise if the generated PDF carries essentially no text; return its char count."""
+    try:
+        chars, pages = _count_extractable_chars(pdf_path)
+    except Exception as e:
+        # Never fail a good translation because the check itself broke.
+        logger.warning(f"Could not inspect output text, skipping empty-output check: {e}")
+        return -1
+
+    floor = max(_MIN_CHARS_ABSOLUTE, pages * _MIN_CHARS_PER_PAGE)
+    if chars < floor:
+        raise EmptyTranslationError(
+            f"Translation produced no translatable text "
+            f"({chars} characters across {pages} pages). "
+            f"The source is most likely a scan or an image-only PDF."
+        )
+    return chars
+
+
 async def _download_glossaries(
     client: httpx.AsyncClient, refs: list[GlossaryRef], work_dir: Path
 ) -> str | None:
@@ -525,6 +582,17 @@ async def create_translation_stream(request: StreamTranslationRequest):
                     result = event["translate_result"]
                     mono_done = False
                     dual_done = False
+
+                    # Verify before uploading: a blank result must never reach
+                    # storage, or the caller has no way to tell it apart from a
+                    # good one. Mono is the translation-only output and therefore
+                    # the honest sample; dual also embeds the source text, which
+                    # would mask an empty translation.
+                    verify_target = result.mono_pdf_path or result.dual_pdf_path
+                    translated_chars = (
+                        _check_output_has_text(Path(verify_target)) if verify_target else -1
+                    )
+
                     async with httpx.AsyncClient(
                         timeout=_TRANSFER_TIMEOUT, follow_redirects=True
                     ) as up:
@@ -549,6 +617,9 @@ async def create_translation_stream(request: StreamTranslationRequest):
                             "mono": mono_done,
                             "dual": dual_done,
                             "time_cost_seconds": result.total_seconds,
+                            # -1 when the check could not run; lets the caller
+                            # distinguish "not measured" from "measured as empty".
+                            "translated_chars": translated_chars,
                         }),
                     }
                     logger.info("Streaming translation completed successfully")
@@ -573,9 +644,26 @@ async def create_translation_stream(request: StreamTranslationRequest):
             # kills its subprocess instead of leaving a zombie translation.
             logger.info("Streaming translation cancelled (client disconnect)")
             raise
+        except EmptyTranslationError as e:
+            logger.error(f"Streaming translation produced no text: {e}")
+            yield {
+                "event": "error",
+                "data": json.dumps({
+                    "message": str(e),
+                    "error_type": type(e).__name__,
+                }),
+            }
         except Exception as e:
             logger.error(f"Streaming translation failed: {e}")
-            yield {"event": "error", "data": json.dumps({"message": str(e)})}
+            # Always carry a type and a non-empty message: an error frame with
+            # neither leaves the caller nothing to classify or show.
+            yield {
+                "event": "error",
+                "data": json.dumps({
+                    "message": str(e) or f"{type(e).__name__} (no message)",
+                    "error_type": type(e).__name__,
+                }),
+            }
         finally:
             slot.release()
             shutil.rmtree(work_dir, ignore_errors=True)
