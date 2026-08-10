@@ -33,7 +33,16 @@ dependencies = [
     "gradio-pdf>=0.0.21",
     "peewee>=3.17.8",
     "fontTools",
-    "babeldoc>=0.6.2,<0.7.0",
+    # Exact version rather than a range: 0.6.3+ raised their floor to
+    # pymupdf>=1.26.7, which the arm64 wheel ceiling below rules out, so the
+    # range only ever resolved here anyway. Say so instead of implying a choice.
+    #
+    # The deployed image replaces this with a fork of the same version carrying
+    # a retry fix (upstream retries only RateLimitError, so a dropped connection
+    # or a 5xx leaves the paragraph untranslated while the run reports success).
+    # It is layered on in the image rather than pinned here because the build
+    # container cannot reach github.com — see vendor/babeldoc in the build repo.
+    "babeldoc==0.6.2",
     "rich",
     "pydantic-settings>=2.8.1",
     "pydantic>=2.10.6",
