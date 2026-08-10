@@ -17,8 +17,12 @@ classifiers = [
 ]
 dependencies = [
     "requests",
-    # for arm64 linux whells
-    "pymupdf<1.25.3",
+    # The old `<1.25.3` ceiling said "for arm64 linux wheels", but aarch64 wheels
+    # were never the issue — what changed at 1.26.7 is the glibc baseline
+    # (manylinux2014 → manylinux_2_28, i.e. glibc 2.17 → 2.28). The build image is
+    # a Python 3.13 Debian slim, which is bookworm or newer (glibc 2.36), so the
+    # ceiling has been protecting against nothing while holding babeldoc at 0.6.2.
+    "pymupdf>=1.26.7",
     "tqdm",
     "tenacity",
     "numpy",
@@ -33,16 +37,11 @@ dependencies = [
     "gradio-pdf>=0.0.21",
     "peewee>=3.17.8",
     "fontTools",
-    # Exact version rather than a range: 0.6.3+ raised their floor to
-    # pymupdf>=1.26.7, which the arm64 wheel ceiling below rules out, so the
-    # range only ever resolved here anyway. Say so instead of implying a choice.
-    #
-    # The deployed image replaces this with a fork of the same version carrying
-    # a retry fix (upstream retries only RateLimitError, so a dropped connection
-    # or a 5xx leaves the paragraph untranslated while the run reports success).
-    # It is layered on in the image rather than pinned here because the build
+    # Exact version rather than a range: the deployed image layers a fork of this
+    # exact commit over the release, so a range here would let the two drift apart.
+    # The fork is layered on in the image rather than pinned here because the build
     # container cannot reach github.com — see vendor/babeldoc in the build repo.
-    "babeldoc==0.6.2",
+    "babeldoc==0.6.4",
     "rich",
     "pydantic-settings>=2.8.1",
     "pydantic>=2.10.6",
