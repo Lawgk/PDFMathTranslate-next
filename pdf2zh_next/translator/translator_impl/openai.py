@@ -9,10 +9,44 @@ from pdf2zh_next.translator.base_translator import BaseTranslator
 from tenacity import before_sleep_log
 from tenacity import retry
 from tenacity import retry_if_exception_type
-from tenacity import stop_after_attempt
-from tenacity import wait_exponential
+from tenacity import wait_exponential_jitter
 
 logger = logging.getLogger(__name__)
+
+# Failures where the request never reached a verdict, so another attempt can
+# still produce one: quota pressure, a connection that dropped or timed out
+# (APITimeoutError subclasses APIConnectionError) and any 5xx from the upstream
+# (every status >= 500 is mapped to InternalServerError by the OpenAI SDK).
+#
+# Everything else is deterministic — a malformed request or a content filter
+# returns the same answer however often it is asked.
+#
+# Retrying only RateLimitError is what let the silent-untranslated failures
+# through: an upstream timeout propagated out of here, il_translator swallowed
+# it, and the source text stayed in the page while the task reported success.
+_RETRYABLE_ERRORS = (
+    openai.RateLimitError,
+    openai.APIConnectionError,
+    openai.InternalServerError,
+)
+
+# A rate limit clears on its own once the window rolls over, so waiting it out
+# costs nothing but time. A degraded upstream is the opposite: retries run below
+# the QPS limiter, so every worker in the pool retries unthrottled and a blip
+# turns into a stampede. Give up early there.
+_RATE_LIMIT_MAX_ATTEMPTS = 100
+_TRANSIENT_MAX_ATTEMPTS = 6
+
+
+def _stop_by_error_kind(retry_state) -> bool:
+    """Cap attempts by failure kind rather than applying one budget to all."""
+    exception = retry_state.outcome.exception() if retry_state.outcome else None
+    limit = (
+        _RATE_LIMIT_MAX_ATTEMPTS
+        if isinstance(exception, openai.RateLimitError)
+        else _TRANSIENT_MAX_ATTEMPTS
+    )
+    return retry_state.attempt_number >= limit
 
 
 class OpenAITranslator(BaseTranslator):
@@ -74,9 +108,9 @@ class OpenAITranslator(BaseTranslator):
             self.add_cache_impact_parameters("enable_json_mode", self.enable_json_mode)
 
     @retry(
-        retry=retry_if_exception_type(openai.RateLimitError),
-        stop=stop_after_attempt(100),
-        wait=wait_exponential(multiplier=1, min=1, max=15),
+        retry=retry_if_exception_type(_RETRYABLE_ERRORS),
+        stop=_stop_by_error_kind,
+        wait=wait_exponential_jitter(initial=1, max=15, jitter=2),
         before_sleep=before_sleep_log(logger, logging.WARNING),
     )
     def do_translate(self, text, rate_limit_params: dict = None) -> str:
@@ -119,9 +153,9 @@ class OpenAITranslator(BaseTranslator):
         return message
 
     @retry(
-        retry=retry_if_exception_type(openai.RateLimitError),
-        stop=stop_after_attempt(100),
-        wait=wait_exponential(multiplier=1, min=1, max=15),
+        retry=retry_if_exception_type(_RETRYABLE_ERRORS),
+        stop=_stop_by_error_kind,
+        wait=wait_exponential_jitter(initial=1, max=15, jitter=2),
         before_sleep=before_sleep_log(logger, logging.WARNING),
     )
     def do_llm_translate(self, text, rate_limit_params: dict = None):

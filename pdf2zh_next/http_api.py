@@ -216,6 +216,19 @@ class TranslationRequest(BaseModel):
     openai_model: str | None = Field(default=None, description="OpenAI model")
     openai_base_url: str | None = Field(default=None, description="OpenAI base URL")
     openai_api_key: str | None = Field(default=None, description="OpenAI API key")
+    # Reasoning is on by default on several of the models we route to, and a
+    # hidden chain of thought costs ~7x the completion tokens of the translation
+    # itself while pushing a single paragraph past two minutes. Callers that
+    # know their model accepts it send "none" here to turn it off; the accepted
+    # values differ per model, so this stays a free string rather than an enum.
+    openai_reasoning_effort: str | None = Field(
+        default=None, description="Reasoning effort passed through to the model"
+    )
+    # Left unset, the OpenAI SDK waits out its own generous default. A stuck
+    # upstream then holds a worker for minutes instead of failing into a retry.
+    openai_timeout: str | None = Field(
+        default=None, description="Per-request timeout in seconds"
+    )
 
 
 class GlossaryRef(BaseModel):
@@ -423,6 +436,11 @@ def create_settings_from_request(
         openai_compatible_model=request.model,
         openai_compatible_base_url=base_url,
         openai_compatible_api_key=api_key,
+        openai_compatible_reasoning_effort=request.openai_reasoning_effort,
+        # The pair is validated together: send_reasoning_effort without a value
+        # raises, so gate the flag on the value actually being present.
+        openai_compatible_send_reasoning_effort=bool(request.openai_reasoning_effort),
+        openai_compatible_timeout=request.openai_timeout,
     )
 
     # Create settings model
