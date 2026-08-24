@@ -13,6 +13,7 @@ from functools import partial
 from logging.handlers import QueueHandler
 from pathlib import Path
 
+import psutil
 from babeldoc.format.pdf.high_level import async_translate as babeldoc_translate
 from babeldoc.format.pdf.translation_config import TranslationConfig as BabelDOCConfig
 from babeldoc.format.pdf.translation_config import (
@@ -111,9 +112,68 @@ logger = logging.getLogger(__name__)
 
 # Maximum time to wait for the next message from the translation subprocess.
 # Subprocess death is detected immediately via its sentinel (see recv_thread),
-# so this only guards against a subprocess that is alive but hung; normal
-# translations emit progress events far more often than this.
+# so this only guards against a subprocess that is alive but hung.
 SUBPROCESS_EVENT_TIMEOUT_SECONDS = 5 * 60
+
+# How often the subprocess reports that it is still working. Several babeldoc
+# phases emit no progress events at all, long enough to trip the timeout above.
+HEARTBEAT_INTERVAL_SECONDS = 30
+
+# CPU a heartbeat must show since the previous one to count as liveness.
+# Threads blocked on a hung upstream drift by milliseconds; real work moves
+# this by seconds.
+HEARTBEAT_MIN_CPU_DELTA_SECONDS = 1.0
+
+
+def _cpu_progress_meter():
+    """Return a callable reporting CPU seconds burned by this process tree.
+
+    Descendants count: the silent phases work in short-lived grandchildren
+    while this process polls in a sleep, so self CPU alone reads as idle.
+
+    Deltas are accumulated rather than the tree re-summed each call, because a
+    descendant's time leaves the sum when it exits and the total would walk
+    backwards. Live children and children_user/system overlap, double-counting
+    a reaped descendant; over-counting is the safe direction here.
+    """
+    last_self = 0.0
+    last_reaped = 0.0
+    last_children: dict[int, float] = {}
+    total = 0.0
+
+    def sample() -> float:
+        nonlocal last_self, last_reaped, last_children, total
+        try:
+            proc = psutil.Process()
+            times = proc.cpu_times()
+
+            self_cpu = times.user + times.system
+            total += max(0.0, self_cpu - last_self)
+            last_self = self_cpu
+
+            reaped = getattr(times, "children_user", 0.0) + getattr(
+                times, "children_system", 0.0
+            )
+            total += max(0.0, reaped - last_reaped)
+            last_reaped = reaped
+
+            seen: dict[int, float] = {}
+            for child in proc.children(recursive=True):
+                try:
+                    child_times = child.cpu_times()
+                except (psutil.Error, OSError):
+                    continue
+                child_cpu = child_times.user + child_times.system
+                seen[child.pid] = child_cpu
+                # A recycled pid only ever undercounts, never the reverse.
+                total += max(0.0, child_cpu - last_children.get(child.pid, 0.0))
+            last_children = seen
+        except Exception:
+            # Liveness reporting must never be what kills a translation.
+            pass
+        return total
+
+    return sample
 
 
 def _translate_wrapper(
@@ -125,6 +185,25 @@ def _translate_wrapper(
 ):
     logger = logging.getLogger(__name__)
     cancel_event = threading.Event()
+    heartbeat_stop = threading.Event()
+    heartbeat_t = None
+    # The heartbeat thread shares the progress pipe with the translation loop,
+    # and Connection.send is not thread-safe.
+    send_lock = threading.Lock()
+
+    def send_progress(obj):
+        with send_lock:
+            pipe_progress_send.send(obj)
+
+    def heartbeat_thread():
+        cpu_progress = _cpu_progress_meter()
+        while not heartbeat_stop.wait(HEARTBEAT_INTERVAL_SECONDS):
+            try:
+                send_progress({"type": "heartbeat", "cpu_seconds": cpu_progress()})
+            except Exception:
+                # Pipe closed under us: the parent is already tearing down.
+                break
+
     try:
         logging.getLogger("asyncio").setLevel(logging.WARNING)
         logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -135,6 +214,9 @@ def _translate_wrapper(
 
         queue_handler = QueueHandler(logger_queue)
         logging.basicConfig(level=logging.INFO, handlers=[queue_handler])
+
+        heartbeat_t = threading.Thread(target=heartbeat_thread, daemon=True)
+        heartbeat_t.start()
 
         # Workaround for loky spawning powershell.exe on Windows.
         # loky queries physical CPU cores via powershell.exe without
@@ -186,7 +268,7 @@ def _translate_wrapper(
                             message=f"Babeldoc translation error: {error_msg}",
                             original_error=error_msg,
                         )
-                        pipe_progress_send.send(error)
+                        send_progress(error)
                         break
                     # Send normal progress events as before
                     if event["type"] == "finish":
@@ -276,9 +358,9 @@ def _translate_wrapper(
                             ]
 
                         event["token_usage"] = token_usage
-                        pipe_progress_send.send(event)
+                        send_progress(event)
                         break
-                    pipe_progress_send.send(event)
+                    send_progress(event)
             except Exception as e:
                 # Capture non-babeldoc errors during translation
                 tb_str = traceback.format_exc()
@@ -289,7 +371,7 @@ def _translate_wrapper(
                     traceback_str=tb_str,
                 )
                 try:
-                    pipe_progress_send.send(error)
+                    send_progress(error)
                 except Exception as pipe_err:
                     if not cancel_event.is_set():
                         logger.error(f"Failed to send error through pipe: {pipe_err}")
@@ -306,7 +388,7 @@ def _translate_wrapper(
                 message=f"Failed to run translation process: {e}", traceback_str=tb_str
             )
             try:
-                pipe_progress_send.send(error)
+                send_progress(error)
             except Exception as pipe_err:
                 if not cancel_event.is_set():
                     logger.error(f"Failed to send error through pipe: {pipe_err}")
@@ -319,14 +401,21 @@ def _translate_wrapper(
                 message=f"Translation subprocess initialization error: {e}",
                 traceback_str=tb_str,
             )
-            pipe_progress_send.send(error)
+            send_progress(error)
         except Exception as pipe_err:
             if not cancel_event.is_set():
                 logger.error(f"Failed to send error through pipe: {pipe_err}")
     finally:
+        # Stop the heartbeat before the closing sentinel, so it can never write
+        # to the pipe after None has been sent.
+        heartbeat_stop.set()
+        if heartbeat_t is not None:
+            # Bounded only so a thread stuck mid-send cannot hold up teardown.
+            heartbeat_t.join(5)
+
         logger.debug("sub process send close")
         try:
-            pipe_progress_send.send(None)
+            send_progress(None)
             pipe_progress_send.close()
             logger.debug("sub process close pipe progress send")
         except Exception as e:
@@ -355,8 +444,11 @@ async def _translate_in_subprocess(
     )
     logger_queue = multiprocessing.Queue()
     cancel_event = threading.Event()
+    # High-water mark of the subprocess tree's CPU time, from its heartbeats.
+    heartbeat_cpu_seen = 0.0
 
     def recv_thread():
+        nonlocal heartbeat_cpu_seen
         while True:
             if cancel_event.is_set():
                 break
@@ -396,6 +488,20 @@ async def _translate_in_subprocess(
                     cb.error_callback(event)
                     break
                 elif isinstance(event, dict):
+                    if event.get("type") == "heartbeat":
+                        cpu = event.get("cpu_seconds")
+                        if (
+                            not isinstance(cpu, int | float)
+                            or cpu
+                            < heartbeat_cpu_seen + HEARTBEAT_MIN_CPU_DELTA_SECONDS
+                        ):
+                            # Alive but idle: let the timeout fire on schedule.
+                            continue
+                        heartbeat_cpu_seen = cpu
+                        # Reaching the queue is what resets the timeout; the
+                        # consumer loop drops it before yielding.
+                        cb.step_callback(event)
+                        continue
                     # Process normal progress events
                     cb.step_callback(event)
                 else:
@@ -466,11 +572,16 @@ async def _translate_in_subprocess(
                 # Let AsyncCallback.__anext__ raise the error
                 # This will break out of the loop
                 break
-            yield event.args[0]
+            payload = event.args[0]
+            if isinstance(payload, dict) and payload.get("type") == "heartbeat":
+                # Liveness only: it has already reset the timeout by arriving.
+                continue
+            yield payload
     except (TimeoutError, asyncio.TimeoutError) as e:
         raise IPCError(
             f"No message from translation subprocess for "
-            f"{SUBPROCESS_EVENT_TIMEOUT_SECONDS} seconds; assuming it is stuck"
+            f"{SUBPROCESS_EVENT_TIMEOUT_SECONDS} seconds and no sign of it "
+            f"doing work; assuming it is stuck"
         ) from e
     except asyncio.CancelledError:
         cancel_flag = True
