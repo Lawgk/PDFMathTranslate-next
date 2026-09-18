@@ -638,6 +638,10 @@ async def create_translation_stream(request: StreamTranslationRequest):
                             # -1 when the check could not run; lets the caller
                             # distinguish "not measured" from "measured as empty".
                             "translated_chars": translated_chars,
+                            # Input BabelDOC tolerated rather than rejected, e.g.
+                            # an unknown operator it skipped; the output may be
+                            # missing or misplacing content.
+                            "degradations": event.get("degradations", []),
                         }),
                     }
                     logger.info("Streaming translation completed successfully")

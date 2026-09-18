@@ -176,6 +176,28 @@ def _cpu_progress_meter():
     return sample
 
 
+class _DegradationCollector(logging.Handler):
+    """Collects the input BabelDOC tolerated instead of rejecting.
+
+    BabelDOC marks those warnings with a ``babeldoc_degradation`` record
+    attribute. The translation still succeeds, so this is the only way the
+    caller learns the output may be missing or misplacing content.
+    """
+
+    def __init__(self):
+        super().__init__(level=logging.WARNING)
+        self._seen: dict[tuple[str, str], None] = {}
+
+    def emit(self, record: logging.LogRecord) -> None:
+        marker = getattr(record, "babeldoc_degradation", None)
+        if isinstance(marker, dict):
+            key = (str(marker.get("kind")), str(marker.get("detail")))
+            self._seen.setdefault(key, None)
+
+    def degradations(self) -> list[dict[str, str]]:
+        return [{"kind": kind, "detail": detail} for kind, detail in self._seen]
+
+
 def _translate_wrapper(
     settings: SettingsModel,
     file: Path,
@@ -190,6 +212,7 @@ def _translate_wrapper(
     # The heartbeat thread shares the progress pipe with the translation loop,
     # and Connection.send is not thread-safe.
     send_lock = threading.Lock()
+    degradation_collector = _DegradationCollector()
 
     def send_progress(obj):
         with send_lock:
@@ -213,7 +236,9 @@ def _translate_wrapper(
         logging.getLogger("peewee").setLevel(logging.WARNING)
 
         queue_handler = QueueHandler(logger_queue)
-        logging.basicConfig(level=logging.INFO, handlers=[queue_handler])
+        logging.basicConfig(
+            level=logging.INFO, handlers=[queue_handler, degradation_collector]
+        )
 
         heartbeat_t = threading.Thread(target=heartbeat_thread, daemon=True)
         heartbeat_t.start()
@@ -358,6 +383,7 @@ def _translate_wrapper(
                             ]
 
                         event["token_usage"] = token_usage
+                        event["degradations"] = degradation_collector.degradations()
                         send_progress(event)
                         break
                     send_progress(event)
