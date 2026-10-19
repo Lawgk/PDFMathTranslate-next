@@ -42,6 +42,9 @@ dependencies = [
     # The fork is layered on in the image rather than pinned here because the build
     # container cannot reach github.com — see vendor/babeldoc in the build repo.
     "babeldoc==0.6.4",
+    # babeldoc asks only for bitstring>=4.3.0, but 5.0.0 (2026-10-11) dropped the
+    # BitStream class its PDF writer imports, so a fresh resolve breaks the import.
+    "bitstring>=4.3.0,<5",
     "rich",
     "pydantic-settings>=2.8.1",
     "pydantic>=2.10.6",
