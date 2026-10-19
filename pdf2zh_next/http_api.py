@@ -9,6 +9,7 @@ and streams progress back over SSE on the same connection.
 from __future__ import annotations
 
 import asyncio
+import base64
 import csv
 import io
 import json
@@ -32,6 +33,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from pdf2zh_next.high_level import do_translate_async_stream
 from pdf2zh_next.models_config import SUPPORTED_MODELS, DEFAULT_MODEL, is_model_supported
+from pdf2zh_next.watermark import stamp_banner
 
 logger = logging.getLogger(__name__)
 
@@ -250,6 +252,16 @@ class StreamTranslationRequest(TranslationRequest):
     )
     glossaries: list[GlossaryRef] = Field(
         default_factory=list, description="Glossary CSVs referenced by signed GET URLs"
+    )
+    watermark_banner_pdf: str | None = Field(
+        default=None,
+        description=(
+            "Base64 one-page PDF stamped above the content of each result; "
+            "null → no banner"
+        ),
+    )
+    watermark_all_pages: bool = Field(
+        default=False, description="Stamp every page instead of the first only"
     )
 
 
@@ -475,6 +487,34 @@ async def _upload_file(client: httpx.AsyncClient, put_url: str, src: Path) -> No
     resp.raise_for_status()
 
 
+def _stamp_results(request: StreamTranslationRequest, mono: str | None, dual: str | None) -> bool:
+    """Stamp the requested banner onto the results; True if every result got it.
+
+    A failure leaves that result unstamped instead of failing the translation:
+    the user still gets the document they waited for, and the caller sees
+    ``watermarked: false`` in the done event.
+    """
+    try:
+        banner = base64.b64decode(request.watermark_banner_pdf, validate=True)
+    except ValueError:
+        logger.exception("Watermark banner is not valid base64")
+        return False
+    dual_columns = 1 if request.use_alternating_pages_dual else 2
+    all_stamped = True
+    for path, columns in ((mono, 1), (dual, dual_columns)):
+        if not path:
+            continue
+        try:
+            stamped = stamp_banner(
+                Path(path), banner, columns=columns, all_pages=request.watermark_all_pages
+            )
+        except Exception:
+            logger.exception(f"Failed to stamp watermark banner onto {path}")
+            stamped = 0
+        all_stamped = all_stamped and stamped > 0
+    return all_stamped
+
+
 def _count_extractable_chars(pdf_path: Path) -> tuple[int, int]:
     """Return (non-whitespace character count, page count) of a generated PDF.
 
@@ -611,6 +651,13 @@ async def create_translation_stream(request: StreamTranslationRequest):
                         _check_output_has_text(Path(verify_target)) if verify_target else -1
                     )
 
+                    # After the check, which must see the translation alone.
+                    watermarked = False
+                    if request.watermark_banner_pdf:
+                        watermarked = await asyncio.to_thread(
+                            _stamp_results, request, result.mono_pdf_path, result.dual_pdf_path
+                        )
+
                     async with httpx.AsyncClient(
                         timeout=_TRANSFER_TIMEOUT, follow_redirects=True
                     ) as up:
@@ -642,6 +689,7 @@ async def create_translation_stream(request: StreamTranslationRequest):
                             # an unknown operator it skipped; the output may be
                             # missing or misplacing content.
                             "degradations": event.get("degradations", []),
+                            "watermarked": watermarked,
                         }),
                     }
                     logger.info("Streaming translation completed successfully")
