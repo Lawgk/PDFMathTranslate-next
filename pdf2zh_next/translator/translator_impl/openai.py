@@ -64,6 +64,11 @@ class OpenAITranslator(BaseTranslator):
             base_url=settings.translate_engine_settings.openai_base_url,
             api_key=settings.translate_engine_settings.openai_api_key,
             timeout=float(self.timeout) if self.timeout else openai.NOT_GIVEN,
+            # The tenacity policy on the translate methods is the only retry
+            # layer. The SDK's own retries (2 by default) run inside each of its
+            # attempts and log nothing here, so one stalled request could wait
+            # out three timeouts before a single line appeared.
+            max_retries=0,
             http_client=httpx.Client(
                 limits=httpx.Limits(
                     max_connections=None, max_keepalive_connections=None
