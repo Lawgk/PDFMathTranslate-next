@@ -137,16 +137,3 @@ SUPPORTED_MODELS: list[ModelInfo] = [
 
 # Default model if none specified
 DEFAULT_MODEL = "deepseek-v3.2"
-
-
-def get_model_by_id(model_id: str) -> ModelInfo | None:
-    """Get model information by ID."""
-    for model in SUPPORTED_MODELS:
-        if model["id"] == model_id:
-            return model
-    return None
-
-
-def is_model_supported(model_id: str) -> bool:
-    """Check if a model is supported."""
-    return get_model_by_id(model_id) is not None

@@ -32,7 +32,7 @@ from pydantic import Field
 from sse_starlette.sse import EventSourceResponse
 
 from pdf2zh_next.high_level import do_translate_async_stream
-from pdf2zh_next.models_config import SUPPORTED_MODELS, DEFAULT_MODEL, is_model_supported
+from pdf2zh_next.models_config import SUPPORTED_MODELS, DEFAULT_MODEL
 from pdf2zh_next.watermark import stamp_banner
 
 logger = logging.getLogger(__name__)
@@ -341,9 +341,9 @@ def create_settings_from_request(
     """Create settings from translation request.
 
     All translations use OpenAI Compatible API.
-    Credentials are resolved per request, falling back to environment variables:
-    - base URL: request.openai_base_url or OPENAI_API_BASE
-    - API key:  request.openai_api_key or OPENAI_API_KEY
+    Credentials come only from the request (openai_base_url / openai_api_key).
+    There is no environment fallback: a caller that sends no routing fails
+    here instead of spending a shared upstream key outside billing.
 
     Args:
         request: Translation request parameters
@@ -351,7 +351,6 @@ def create_settings_from_request(
         output_dir: Directory for output files
         glossaries: Comma-separated list of glossary file paths
     """
-    import os
     from pdf2zh_next.config import (
         BasicSettings,
         OpenAICompatibleSettings,
@@ -360,34 +359,19 @@ def create_settings_from_request(
         TranslationSettings,
     )
 
-    # Resolve configuration: per-request values take precedence over env vars
-    base_url = request.openai_base_url or os.environ.get("OPENAI_API_BASE")
-    api_key = request.openai_api_key or os.environ.get("OPENAI_API_KEY")
-
-    # A per-request base URL routes through an upstream gateway that owns the
-    # authoritative model catalog, so defer model validation to it; env-var-only
-    # callers keep the local whitelist check.
-    if request.openai_base_url:
-        logger.info(
-            f"Per-request base URL set; deferring model validation for '{request.model}' to upstream"
-        )
-    elif not is_model_supported(request.model):
-        raise ValueError(
-            f"Unsupported model: {request.model}. "
-            f"Use GET /v1/models to see all available models."
-        )
-
+    # The upstream gateway owns the authoritative model catalog, so model
+    # validation is left to it.
+    base_url = request.openai_base_url
+    api_key = request.openai_api_key
     if not base_url:
         raise ValueError(
             "OpenAI-compatible base URL is required. "
-            "Provide 'openai_base_url' in the request or set the "
-            "OPENAI_API_BASE environment variable."
+            "Provide 'openai_base_url' in the request."
         )
     if not api_key:
         raise ValueError(
             "OpenAI-compatible API key is required. "
-            "Provide 'openai_api_key' in the request or set the "
-            "OPENAI_API_KEY environment variable."
+            "Provide 'openai_api_key' in the request."
         )
 
     logger.info(f"Using model: {request.model}")
