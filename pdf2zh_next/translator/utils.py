@@ -1,5 +1,7 @@
 import importlib
 import logging
+import threading
+from concurrent.futures import Future
 
 from pdf2zh_next.config.model import SettingsModel
 from pdf2zh_next.config.translate_engine_model import (
@@ -21,11 +23,33 @@ def get_rate_limiter(qps: int | None) -> BaseRateLimiter | None:
     return None
 
 
+def _check_translator(translator: BaseTranslator) -> None:
+    """Perform a short translation ignoring cache to validate translator availability."""
+    translator.translate("Hello", ignore_cache=True)
+
+
+def _start_health_check(translator: BaseTranslator) -> Future:
+    """Run the health check on its own thread; the future holds the outcome."""
+    outcome: Future = Future()
+
+    def run():
+        try:
+            _check_translator(translator)
+        except BaseException as error:
+            outcome.set_exception(error)
+        else:
+            outcome.set_result(None)
+
+    threading.Thread(target=run, name="translator-health-check", daemon=True).start()
+    return outcome
+
+
 def _create_translator_instance(
     settings: SettingsModel,
     translator_config,
     rate_limiter: BaseRateLimiter | None,
     enforce_glossary_support: bool = True,
+    background_check: bool = False,
 ) -> (BaseTranslator, int | None, int | None):
     """Create translator instance from translator_config.
 
@@ -34,6 +58,9 @@ def _create_translator_instance(
         translator_config: Concrete translation engine settings instance.
         rate_limiter: Rate limiter for this translator.
         enforce_glossary_support: Whether to enforce glossary + LLM support check.
+        background_check: Return before the health check answers; its outcome
+            is left in the translator's `health_check` future, and the caller
+            must not report success before it has succeeded.
     """
     if isinstance(translator_config, NOT_SUPPORTED_TRANSLATION_ENGINE_SETTING_TYPE):
         raise TranslateEngineSettingError(
@@ -69,14 +96,18 @@ def _create_translator_instance(
                     translator.pdf2zh_next_recommended_pool_max_workers
                 )
 
-            # Health check: perform a short translation ignoring cache to validate translator availability
-            translator.translate("Hello", ignore_cache=True)
+            if background_check:
+                translator.health_check = _start_health_check(translator)
+            else:
+                _check_translator(translator)
             return translator, recommended_qps, recommended_pool_max_workers
 
     raise ValueError("No translator found")
 
 
-def get_translator(settings: SettingsModel) -> BaseTranslator:
+def get_translator(
+    settings: SettingsModel, background_check: bool = False
+) -> BaseTranslator:
     """Get main translator instance according to translate_engine_settings."""
     translator_config = settings.translate_engine_settings
     rate_limiter = get_rate_limiter(settings.translation.qps)
@@ -86,6 +117,7 @@ def get_translator(settings: SettingsModel) -> BaseTranslator:
             translator_config=translator_config,
             rate_limiter=rate_limiter,
             enforce_glossary_support=True,
+            background_check=background_check,
         )
     )
     if recommended_qps:
@@ -97,7 +129,9 @@ def get_translator(settings: SettingsModel) -> BaseTranslator:
     return translator
 
 
-def get_term_translator(settings: SettingsModel) -> BaseTranslator | None:
+def get_term_translator(
+    settings: SettingsModel, background_check: bool = False
+) -> BaseTranslator | None:
     """Get term-extraction translator instance if configured.
 
     This translator uses a potentially different engine and separate rate limit
@@ -117,6 +151,7 @@ def get_term_translator(settings: SettingsModel) -> BaseTranslator | None:
             translator_config=translator_config,
             rate_limiter=rate_limiter,
             enforce_glossary_support=False,
+            background_check=background_check,
         )
     )
     if recommended_qps:

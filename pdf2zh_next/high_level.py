@@ -9,6 +9,7 @@ import sys
 import threading
 import traceback
 from collections.abc import AsyncGenerator
+from concurrent.futures import Future
 from functools import partial
 from logging.handlers import QueueHandler
 from pathlib import Path
@@ -198,6 +199,33 @@ class _DegradationCollector(logging.Handler):
         return [{"kind": kind, "detail": detail} for kind, detail in self._seen]
 
 
+def _initialization_error(error: BaseException) -> SubprocessError:
+    return SubprocessError(
+        message=f"Translation subprocess initialization error: {error}",
+        traceback_str="".join(traceback.format_exception(error)),
+    )
+
+
+async def _failed_health_check(
+    config: BabelDOCConfig, wait: bool
+) -> BaseException | None:
+    """The error of a failed translator health check, if one has failed.
+
+    With wait, wait for the checks still running first.
+    """
+    checks: list[Future] = []
+    for translator in (config.translator, config.term_extraction_translator):
+        check = getattr(translator, "health_check", None)
+        if check is not None and check not in checks:
+            checks.append(check)
+    if wait and checks:
+        await asyncio.wait([asyncio.wrap_future(check) for check in checks])
+    for check in checks:
+        if check.done() and check.exception() is not None:
+            return check.exception()
+    return None
+
+
 def _translate_wrapper(
     settings: SettingsModel,
     file: Path,
@@ -268,7 +296,11 @@ def _translate_wrapper(
                     exc_info=True,
                 )
 
-        config = create_babeldoc_config(settings, file)
+        # The health check is one LLM round trip, seconds long; it runs while
+        # BabelDOC parses the document, and no outcome is reported before it
+        # has answered. A dead translator would otherwise go unnoticed: BabelDOC
+        # keeps the original text of every paragraph it fails to translate.
+        config = create_babeldoc_config(settings, file, background_check=True)
 
         def cancel_recv_thread():
             try:
@@ -286,6 +318,14 @@ def _translate_wrapper(
             try:
                 async for event in babeldoc_translate(config):
                     logger.debug(f"sub process generate event: {event}")
+                    check_error = await _failed_health_check(
+                        config, wait=event["type"] in ("error", "finish")
+                    )
+                    if check_error is not None:
+                        logger.error(f"Translator health check failed: {check_error}")
+                        config.cancel_translation()
+                        send_progress(_initialization_error(check_error))
+                        break
                     if event["type"] == "error":
                         # Convert babeldoc error to structured exception
                         error_msg = str(event.get("error", "Unknown babeldoc error"))
@@ -423,11 +463,7 @@ def _translate_wrapper(
         tb_str = traceback.format_exc()
         logger.error(f"Subprocess initialization error: {e}\n{tb_str}")
         try:
-            error = SubprocessError(
-                message=f"Translation subprocess initialization error: {e}",
-                traceback_str=tb_str,
-            )
-            send_progress(error)
+            send_progress(_initialization_error(e))
         except Exception as pipe_err:
             if not cancel_event.is_set():
                 logger.error(f"Failed to send error through pipe: {pipe_err}")
@@ -707,10 +743,17 @@ def _get_glossaries(settings: SettingsModel) -> list[Glossary] | None:
     return glossaries
 
 
-def create_babeldoc_config(settings: SettingsModel, file: Path) -> BabelDOCConfig:
+def create_babeldoc_config(
+    settings: SettingsModel, file: Path, background_check: bool = False
+) -> BabelDOCConfig:
+    """Build BabelDOC's config, with the translators it uses.
+
+    With background_check, the translators' health checks are still running
+    when this returns (see `_create_translator_instance`).
+    """
     if not isinstance(settings, SettingsModel):
         raise ValueError(f"{type(settings)} is not SettingsModel")
-    translator = get_translator(settings)
+    translator = get_translator(settings, background_check=background_check)
     if translator is None:
         raise ValueError("No translator found")
 
@@ -730,7 +773,9 @@ def create_babeldoc_config(settings: SettingsModel, file: Path) -> BabelDOCConfi
                 f"Updated term pool max workers to {recommended_pool_max_workers}"
             )
     else:
-        term_extraction_translator = get_term_translator(settings)
+        term_extraction_translator = get_term_translator(
+            settings, background_check=background_check
+        )
 
     # 设置分割策略
     split_strategy = None
